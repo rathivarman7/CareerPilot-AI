@@ -1,10 +1,19 @@
 import streamlit as st
 import re
 from io import BytesIO
-
+import os
+from dotenv import load_dotenv
+from google import genai
 from pypdf import PdfReader
 from docx import Document
+load_dotenv(override=True)
 
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+
+if gemini_api_key:
+    client = genai.Client(api_key=gemini_api_key)
+else:
+    client = None
 
 # ---------------------------------------------------------
 # PAGE CONFIGURATION
@@ -114,7 +123,7 @@ def extract_docx_text(uploaded_file):
 
 
 def extract_resume_text(uploaded_file):
-
+    
     if uploaded_file is None:
         return ""
 
@@ -215,8 +224,158 @@ def analyze_resume(text):
         section_results[section] = found
 
     return section_results
+def generate_ai_resume_analysis(
+    resume_text,
+    target_role
+):
 
+    if client is None:
+        return "Gemini API key is not configured."
 
+    if not resume_text.strip():
+        return "No resume text was extracted."
+
+    prompt = f"""
+You are CareerPilot AI, an expert resume and career assistant.
+
+Analyze ONLY the resume provided below.
+
+TARGET JOB ROLE:
+{target_role}
+
+RESUME TEXT:
+-------------------------
+{resume_text}
+-------------------------
+
+Based strictly on the resume, provide:
+
+## 1. Professional Summary
+Write an improved professional summary.
+
+## 2. Top Strengths
+Identify the strongest skills and experiences actually present.
+
+## 3. Technical Skills
+List technical skills found in the resume.
+
+## 4. Missing / Recommended Skills
+Suggest skills relevant to the target role that are not
+clearly demonstrated in the resume.
+
+## 5. Resume Weaknesses
+Identify specific weaknesses in the current resume.
+
+## 6. Project Improvements
+Suggest how the existing projects can be described better.
+Do not invent projects.
+
+## 7. Experience Improvements
+Suggest improvements to existing experience.
+Do not invent experience.
+
+## 8. ATS Keywords
+Suggest relevant keywords for the target role.
+
+## 9. Career Recommendation
+Give practical recommendations for improving the resume
+and preparing for the target role.
+
+IMPORTANT:
+- Do not invent qualifications.
+- Do not invent work experience.
+- Do not invent projects.
+- Do not invent certifications.
+- Clearly distinguish existing skills from recommended skills.
+- Use the actual resume content as the primary source.
+"""
+
+    try:
+
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=prompt
+        )
+
+        if response.text:
+            return response.text
+
+        return "Gemini returned an empty response."
+
+    except Exception as error:
+
+        return f"AI analysis failed: {error}"
+def generate_improved_resume(resume_text, target_role, job_description=""):
+
+    if client is None:
+        return "Gemini API key is not configured."
+
+    prompt = f"""
+You are CareerPilot AI, an expert professional resume writer.
+
+Rewrite the resume below for the target job role.
+
+TARGET ROLE:
+{target_role}
+
+JOB DESCRIPTION:
+{job_description if job_description.strip() else "Not provided"}
+
+ORIGINAL RESUME:
+-------------------------
+{resume_text}
+-------------------------
+
+Create an ATS-friendly, professional resume.
+
+Use ONLY information supported by the original resume.
+
+IMPORTANT RULES:
+- Do not invent experience.
+- Do not invent projects.
+- Do not invent education.
+- Do not invent certifications.
+- Do not invent skills.
+- Do not add fake achievements or metrics.
+- Improve wording and structure.
+- Keep factual information unchanged.
+- Prioritize skills relevant to the target role.
+- Use strong action verbs.
+- Make project descriptions concise and professional.
+
+Return the resume using this structure:
+
+PROFESSIONAL SUMMARY
+
+TECHNICAL SKILLS
+
+EDUCATION
+
+PROJECTS
+
+EXPERIENCE
+
+CERTIFICATIONS
+
+ACHIEVEMENTS
+
+If a section does not exist in the original resume,
+do not create fake content for it.
+"""
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=prompt
+        )
+
+        if response.text:
+            return response.text
+
+        return "Gemini returned an empty response."
+
+    except Exception as error:
+        return f"Resume generation failed: {error}"
 # ---------------------------------------------------------
 # ATS SCORE
 # ---------------------------------------------------------
@@ -313,11 +472,19 @@ uploaded_file = st.file_uploader(
     type=["pdf", "docx"]
 )
 
+
+st.subheader("🎯 Target Job")
+
 target_role = st.text_input(
-    "🎯 Target Job Role",
-    placeholder="Example: Machine Learning Engineer"
+    "Target Job Role",
+    placeholder="e.g. Machine Learning Engineer"
 )
 
+job_description = st.text_area(
+    "Job Description (Optional)",
+    placeholder="Paste the job description here...",
+    height=200
+)
 
 # ---------------------------------------------------------
 # ANALYZE BUTTON
@@ -347,10 +514,18 @@ if st.button(
             "Analyzing your resume..."
         ):
 
-            resume_text = extract_resume_text(
-                uploaded_file
-            )
+            resume_text = extract_resume_text(uploaded_file)
 
+            st.session_state.resume_text = resume_text
+
+            if resume_text:
+                st.success(
+                    f"✅ Resume saved successfully! "
+                    f"{len(resume_text.split())} words extracted."
+                )
+            else:
+                st.error("❌ No text was extracted from the resume.")
+            
             if not resume_text.strip():
 
                 st.error(
@@ -383,7 +558,114 @@ if st.button(
                     "Resume analysis completed!"
                 )
 
+st.divider()
 
+st.subheader("🤖 AI Resume Analysis")
+
+if st.button(
+    "✨ Generate AI Analysis",
+    type="primary",
+    use_container_width=True
+):
+
+    resume_text = st.session_state.get(
+        "resume_text",
+        ""
+    )
+
+    current_target_role = target_role.strip()
+
+    if not resume_text.strip():
+
+        st.error(
+            "Resume text is empty. Please upload and analyze "
+            "your resume first."
+        )
+
+    elif not current_target_role:
+
+        st.error(
+            "Please enter a target job role."
+        )
+
+    else:
+
+        st.info(
+            f"Sending {len(resume_text.split())} words "
+            f"from your resume to Gemini..."
+        )
+
+        with st.spinner(
+            "Gemini is analyzing your resume..."
+        ):
+
+            ai_result = generate_ai_resume_analysis(
+                resume_text,
+                current_target_role
+            )
+
+        st.markdown(ai_result)
+st.divider()
+
+st.subheader("📄 AI Resume Generator")
+
+if st.button(
+    "✨ Generate Improved Resume",
+    type="primary",
+    use_container_width=True
+):
+
+    resume_text = st.session_state.get(
+        "resume_text",
+        ""
+    )
+
+    if not resume_text.strip():
+
+        st.error(
+            "Please upload and analyze your resume first."
+        )
+
+    elif not target_role.strip():
+
+        st.error(
+            "Please enter your target job role."
+        )
+
+    else:
+
+        with st.spinner(
+            "Gemini is creating your improved resume..."
+        ):
+
+            improved_resume = generate_improved_resume(
+                resume_text,
+                target_role,
+                job_description
+            )
+
+        st.session_state["improved_resume"] = improved_resume
+
+        st.success(
+            "Your improved resume has been generated!"
+        )
+if "improved_resume" in st.session_state:
+
+    st.divider()
+
+    st.subheader("📋 Generated Resume")
+
+    st.markdown(
+        st.session_state["improved_resume"]
+    )
+
+    st.download_button(
+        label="⬇️ Download Resume as TXT",
+        data=st.session_state["improved_resume"],
+        file_name="CareerPilot_Improved_Resume.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
 # ---------------------------------------------------------
 # RESULTS
 # ---------------------------------------------------------
