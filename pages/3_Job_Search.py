@@ -1,74 +1,420 @@
 import streamlit as st
+import os
+import re
 
-st.set_page_config(page_title="Job Search", page_icon="💼", layout="wide")
+from dotenv import load_dotenv
+from google import genai
 
-st.title("💼 Relevant Job Search")
-st.caption("Find jobs that match your profile. This demo uses sample job data; connect a permitted job API for live listings.")
 
-profile = st.session_state.get("profile", {})
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-roles = [
-    "Machine Learning Engineer",
-    "Data Scientist",
-    "Python Developer",
-    "NLP Engineer",
-    "AI Engineer",
-    "Software Engineer"
-]
+load_dotenv(override=True)
 
-role = st.selectbox("Search Role", roles, index=roles.index(profile.get("target_role")) if profile.get("target_role") in roles else 0)
-location = st.text_input("Preferred Location", value="India")
-remote = st.selectbox("Work Mode", ["Any", "Remote", "Hybrid", "On-site"])
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-jobs = [
-    {"title":"Junior Machine Learning Engineer","company":"TechNova","location":"Bengaluru","mode":"Hybrid","skills":["Python","Machine Learning","SQL","TensorFlow"],"score":0},
-    {"title":"AI Engineer","company":"InnovateAI","location":"Chennai","mode":"On-site","skills":["Python","NLP","Machine Learning","Docker"],"score":0},
-    {"title":"Data Scientist","company":"DataWorks","location":"Hyderabad","mode":"Remote","skills":["Python","SQL","Statistics","Machine Learning"],"score":0},
-    {"title":"Python Developer","company":"CloudSoft","location":"Pune","mode":"Hybrid","skills":["Python","FastAPI","SQL","Git"],"score":0},
-    {"title":"NLP Engineer","company":"LanguageLabs","location":"Remote","mode":"Remote","skills":["Python","NLP","Transformers","PyTorch"],"score":0},
-]
+if GEMINI_API_KEY:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    client = None
 
-user_skills = {s.lower() for s in profile.get("skills", [])}
 
-if st.button("🔎 Find Matching Jobs", use_container_width=True):
-    results = []
-    for job in jobs:
-        role_match = role.lower().split()[0] in job["title"].lower() or role.lower() in job["title"].lower()
-        skill_hits = sum(1 for s in job["skills"] if s.lower() in user_skills)
-        skill_score = skill_hits / len(job["skills"]) * 100
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
-        score = skill_score
-        if role_match:
-            score += 15
-        if remote != "Any" and remote == job["mode"]:
-            score += 10
+st.set_page_config(
+    page_title="Job Search",
+    page_icon="💼",
+    layout="wide"
+)
 
-        job["score"] = min(100, round(score))
-        results.append(job)
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+# ============================================================
+# SESSION STATE
+# ============================================================
 
-    st.subheader("Recommended Jobs")
+if "resume_text" not in st.session_state:
+    st.session_state["resume_text"] = ""
 
-    for job in results:
-        with st.container(border=True):
-            c1,c2 = st.columns([4,1])
-            with c1:
-                st.markdown(f"### {job['title']}")
-                st.write(f"**{job['company']}** • {job['location']} • {job['mode']}")
-                st.write("Required skills:", ", ".join(job["skills"]))
-            with c2:
-                st.metric("Match", f"{job['score']}%")
-                st.button("View Job", key=job["title"])
+if "target_role" not in st.session_state:
+    st.session_state["target_role"] = ""
 
-    if results:
-        best = results[0]
-        missing = [s for s in best["skills"] if s.lower() not in user_skills]
-        st.markdown("---")
-        st.subheader("🎯 Career Gap Analysis")
-        if missing:
-            st.warning("Skills to improve: " + ", ".join(missing))
-        else:
-            st.success("You already have all listed skills for the top matching job.")
+if "job_analysis" not in st.session_state:
+    st.session_state["job_analysis"] = ""
 
-st.info("For production use, connect this page to a legitimate job-search API or licensed job data source rather than scraping websites without permission.")
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.title("💼 Job Search")
+
+st.write(
+    "Find relevant job opportunities based on your "
+    "skills, resume and career goals."
+)
+
+
+# ============================================================
+# LOAD RESUME
+# ============================================================
+
+resume_text = st.session_state.get(
+    "resume_text",
+    ""
+)
+
+saved_target_role = st.session_state.get(
+    "target_role",
+    ""
+)
+
+
+# ============================================================
+# SEARCH DETAILS
+# ============================================================
+
+st.subheader("🔎 Job Search Preferences")
+
+target_role = st.text_input(
+    "Job Role",
+    value=saved_target_role,
+    placeholder="Example: Machine Learning Engineer"
+)
+
+location = st.text_input(
+    "Preferred Location",
+    placeholder="Example: Chennai, Bangalore, Remote"
+)
+
+experience_level = st.selectbox(
+    "Experience Level",
+    [
+        "Any",
+        "Internship",
+        "Fresher",
+        "Entry Level",
+        "1-3 Years",
+        "3-5 Years"
+    ]
+)
+
+remote_option = st.selectbox(
+    "Work Preference",
+    [
+        "Any",
+        "Remote",
+        "Hybrid",
+        "On-site"
+    ]
+)
+
+
+# Save target role
+
+st.session_state["target_role"] = target_role
+
+
+# ============================================================
+# RESUME STATUS
+# ============================================================
+
+st.subheader("📄 Candidate Profile")
+
+if resume_text.strip():
+
+    st.success(
+        f"✅ Resume loaded — {len(resume_text.split())} words"
+    )
+
+else:
+
+    st.warning(
+        "⚠️ No resume found. Upload and analyze your resume "
+        "from the Resume Creation page first."
+    )
+
+
+# ============================================================
+# JOB SEARCH LINKS
+# ============================================================
+
+def create_job_search_links(
+    role,
+    location,
+    experience
+):
+
+    role_encoded = role.replace(" ", "+")
+    location_encoded = location.replace(" ", "+")
+
+    links = {
+
+        "LinkedIn Jobs":
+            f"https://www.linkedin.com/jobs/search/"
+            f"?keywords={role_encoded}"
+            f"&location={location_encoded}",
+
+        "Indeed":
+            f"https://www.indeed.com/jobs"
+            f"?q={role_encoded}"
+            f"&l={location_encoded}",
+
+        "Naukri":
+            f"https://www.naukri.com/"
+            f"{role.lower().replace(' ', '-')}-jobs"
+    }
+
+    return links
+
+
+# ============================================================
+# GEMINI JOB MATCHING
+# ============================================================
+
+def analyze_job_match(
+    resume_text,
+    target_role,
+    job_description
+):
+
+    if client is None:
+
+        return (
+            "❌ Gemini API key is not configured."
+        )
+
+    prompt = f"""
+You are CareerPilot AI, an expert career advisor.
+
+Analyze how well the candidate matches the job.
+
+TARGET ROLE:
+{target_role}
+
+JOB DESCRIPTION:
+{job_description}
+
+CANDIDATE RESUME:
+-------------------------
+{resume_text}
+-------------------------
+
+Perform a detailed skill-gap analysis.
+
+Return:
+
+## 🎯 Overall Match Score
+
+Give a score from 0 to 100.
+
+## ✅ Matching Skills
+
+List skills the candidate has that are relevant
+to the job.
+
+## ❌ Missing Skills
+
+List important skills required by the job that are
+not clearly present in the resume.
+
+## ⭐ Strong Matches
+
+Identify the strongest areas of the candidate.
+
+## ⚠️ Skill Gaps
+
+Explain the most important gaps.
+
+## 📚 Recommended Learning
+
+Recommend specific skills or technologies the
+candidate should learn.
+
+## 💡 Application Advice
+
+Give 3 practical suggestions for applying to this job.
+
+IMPORTANT:
+- Use only information supported by the resume.
+- Do not invent candidate skills.
+- Clearly distinguish existing skills from recommended skills.
+"""
+
+
+    try:
+
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=prompt
+        )
+
+        if response.text:
+
+            return response.text
+
+        return "❌ Gemini returned an empty response."
+
+    except Exception as error:
+
+        return f"❌ Job analysis failed: {error}"
+
+
+# ============================================================
+# JOB SEARCH
+# ============================================================
+
+st.divider()
+
+st.subheader("🚀 Search Relevant Jobs")
+
+
+if st.button(
+    "🔍 Find Relevant Jobs",
+    type="primary",
+    use_container_width=True
+):
+
+    if not target_role.strip():
+
+        st.error(
+            "Please enter a job role."
+        )
+
+    elif not location.strip():
+
+        st.error(
+            "Please enter a preferred location."
+        )
+
+    elif not resume_text.strip():
+
+        st.error(
+            "Please upload and analyze your resume "
+            "from the Resume Creation page first."
+        )
+
+    else:
+
+        links = create_job_search_links(
+            target_role,
+            location,
+            experience_level
+        )
+
+        st.subheader("🌐 Job Search Platforms")
+
+        for platform, url in links.items():
+
+            st.markdown(
+                f"### 🔗 [{platform}]({url})"
+            )
+
+        st.info(
+            "These links open job-search pages using "
+            "your selected role and location."
+        )
+
+
+# ============================================================
+# JOB DESCRIPTION MATCHING
+# ============================================================
+
+st.divider()
+
+st.subheader("🤖 AI Job Match Analyzer")
+
+job_description = st.text_area(
+    "Paste a Job Description",
+    placeholder=(
+        "Paste the job description here to calculate "
+        "how well your resume matches the job..."
+    ),
+    height=250
+)
+
+
+if st.button(
+    "🎯 Analyze Job Match",
+    use_container_width=True
+):
+
+    if not resume_text.strip():
+
+        st.error(
+            "Please upload and analyze your resume first."
+        )
+
+    elif not target_role.strip():
+
+        st.error(
+            "Please enter the target job role."
+        )
+
+    elif not job_description.strip():
+
+        st.error(
+            "Please paste a job description."
+        )
+
+    else:
+
+        with st.spinner(
+            "🤖 Gemini is analyzing your job match..."
+        ):
+
+            result = analyze_job_match(
+                resume_text=resume_text,
+                target_role=target_role,
+                job_description=job_description
+            )
+
+        st.session_state[
+            "job_analysis"
+        ] = result
+
+
+# ============================================================
+# DISPLAY MATCH ANALYSIS
+# ============================================================
+
+if st.session_state.get(
+    "job_analysis",
+    ""
+).strip():
+
+    st.divider()
+
+    st.subheader(
+        "📊 AI Job Match Analysis"
+    )
+
+    st.markdown(
+        st.session_state[
+            "job_analysis"
+        ]
+    )
+
+
+# ============================================================
+# CAREER GAP
+# ============================================================
+
+if st.session_state.get(
+    "job_analysis",
+    ""
+).strip():
+
+    st.divider()
+
+    st.subheader(
+        "📈 Career Gap Analysis"
+    )
+
+    st.info(
+        "Use the Missing Skills and Recommended Learning "
+        "sections above to identify the skills you should "
+        "develop for your target role."
+    )
